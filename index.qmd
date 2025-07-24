@@ -26,37 +26,38 @@ invisible(lapply(
 ```
 
 ```{r}
-#| label: reports_access
+#| label: readings_access
 
-reports_access <- my_read_excel_dir(directory="./data/raw/reports_access/", pattern = "\\.xlsx$")
-reports_access[, `ExamDate` := as.Date(as.numeric(`ExamDate`), origin = "1899-12-30")]
+readings_access <- my_read_excel_dir(directory="./data/raw/readings_access/", pattern = "\\.xlsx$")
+readings_access[, `ExamDate` := as.Date(as.numeric(`ExamDate`), origin = "1899-12-30")]
 
-pet_reports_access <- reports_access %>%
+readings_access <- readings_access %>%
   filter(
     grepl("PET|18F", ExamName, ignore.case = TRUE)
   )
 
 ```
 
-```{r}
-#| label: pet_reports_access_ptid_validation
 
-pet_reports_access_invalid_ptid <- my_validate_ptid(pet_reports_access, "PtID")
+
+```{r}
+#| label: readings_access_ptid_validation
+
+readings_access_invalid_ptid <- my_validate_ptid(readings_access, "PtID")
 
 preparations_access <- my_read_excel_dir(directory="./data/raw/preparations_access/", pattern = "\\.xlsx$")
 preparations_access[, `ExamDate` := as.Date(as.numeric(`ExamDate`), origin = "1899-12-30")]
 
 
-pet_reports_access_invalid_ptid[
+readings_access_invalid_ptid[
   preparations_access[, .(PtName, ExamDate, PtID)], 
   on = .(PtName, ExamDate), 
   PtID := i.PtID
 ]
 
 
-
 # 1. NA인 PtID의 PtName 추출
-target_names <- pet_reports_access_invalid_ptid %>%
+target_names <- readings_access_invalid_ptid %>%
   filter(is.na(PtID)) %>%
   pull(PtName) %>%
   unique()
@@ -71,66 +72,61 @@ unique_ptid_dt <- preparations_access_subset[
   by = PtName
 ][n_unique == 1, .(PtName, PtID)]
 
-# 2. pet_reports_access_invalid_ptid에 업데이트
-pet_reports_access_invalid_ptid[
+# 2. readings_access_invalid_ptid에 업데이트
+readings_access_invalid_ptid[
   unique_ptid_dt, 
   on = .(PtName), 
   PtID := i.PtID
 ]
 
-pet_reports_access[
-  pet_reports_access_invalid_ptid, 
+readings_access[
+  readings_access_invalid_ptid, 
   on = .(ID), 
   PtID := i.PtID
 ]
 
-pet_reports_access[PtName == "민병상", PtID := "814428"]
+readings_access[PtName == "민병상", PtID := "814428"]
 
-colSums(is.na(pet_reports_access))
+# colSums(is.na(readings_access))
 
 
+n_access_only <- nrow(readings_access[ExamDate < as.Date("2000-07-04")])
+readings_access[, PtID := my_pad_ptid(PtID)]
+
+n_readings_access <- nrow(readings_access)
 ```
+
 
 ```{r}
-#| label: pet_reports_access
+#| label: "readings_ocr"
 
-preparation_access_raw <- my_read_excel_dir(directory="./data/raw/preparation_access/", pattern = "\\.xlsx$")
+readings_ocs <- my_read_excel_dir (directory="./data/raw/readings_ocs/", pattern = "\\.xlsx$")
+n_readings_ocs <- nrow(readings_ocs)
+setnames(readings_ocs, old = c("환자번호", "실시일시"), new = c("PtID", "ExamDate"))
 
-pet_reports_access_raw_na_ptid_updated_ptid <- merge(
-  pet_reports_access_raw_na_ptid,
-  preparation_access_raw[, .(PtName, ExamDate, PtID)], 
-  by = c("PtName", "ExamDate"), 
-  all.x = TRUE
-)
+# ExamDate를 Date 형식으로 변환
+readings_ocs[, ExamDate := as.Date(ExamDate)]
 
-pet_reports_access_raw_final <- pet_reports_access_raw_na_ptid_updated_ptid %>%
-  select(-PtID.x) %>%                 # PtID.x 컬럼 삭제
-  rename(PtID = PtID.y) %>%           # PtID.y를 PtID로 이름 변경
-  filter(!is.na(PtID))                # PtID가 NA인 행은 제거
+matched_readings_access <- readings_access[readings_ocs, 
+                                           on = .(PtID, ExamDate), 
+                                           nomatch = 0]
 
-pet_reports_access <- bind_rows(
-  pet_reports_access_raw_ptid,
-  pet_reports_access_raw_final
-)
+readings_merged <- merge(readings_access, readings_ocs,
+                    by = c("PtID", "ExamDate"),
+                    all = TRUE,
+                    suffixes = c(".access", ".ocs"))
 
-pet_reports_access[, `ExamDate` := as.Date(as.numeric(`ExamDate`), origin = "1899-12-30")]
 
-pet_reports_access_only <- pet_reports_access %>%
-  filter(ExamDate < as.Date("2000-07-04"))
-
-pet_reports_access_only_invalid_ptid <- my_validate_ptid(pet_reports_access_only, "PtID")
 
 ```
 
-## 시기별 PET 판독/준비기록
 
-앞서의 기술을 보면 PET 판독은 세가지 시기로 구분될 필요가 있습니다. 첫번째 시기는 `1997-07-16`\~`2000-07-03`까지의 기간으로 Access 판독만 있는 시기입니다.
 
 ```{r}
 #| label: preparation_access
 
-preparation_access_raw_invalid_ptid <- my_validate_ptid (preparation_access_raw, "PtID")
-colSums(is.na(preparation_access_raw))
+preparation_access_invalid_ptid <- my_validate_ptid (preparation_access, "PtID")
+colSums(is.na(preparation_access))
 preparation_access_na_ptid_ptname_examdate <- preparation_access_raw %>%
   filter(is.na(PtID) & is.na(PtName) & is.na(ExamDate))
 
@@ -181,22 +177,16 @@ pet_pacs_outsdie <- pet_pacs %>%
 
 ## PET 판독소견조회 (OCR)
 
-```{r}
-#| label: "reports_ocr"
-
-reports_ocr <- my_read_excel_dir (directory="./data/raw/reports_ocr/", pattern = "\\.xlsx$")
-```
-
 -   PACS의 PET 검사목록과는 별개로, OCR에서 PET 판독소견을 조회할 수 있으며, 이는 영상은 없지만 판독소견은 존재합니다.
 -   OCR/핵의학체내/검사관리결과/판독소견조회 메뉴를 사용하면 됩니다.
 -   `2000-07-04`부터 조회됩니다.
--   전산팀으로부터 받은 자료를 통합해서 reports_ocr이란 데이터테이블로 만들었습니다.
+-   전산팀으로부터 받은 자료를 통합해서 readings_ocr이란 데이터테이블로 만들었습니다.
 
 ```{r}
-#| label: "reports_ocr_na"
+#| label: "readings_ocr_na"
 
-colSums(is.na(reports_ocr))
-reports_ocr_na <- reports_ocr %>%
+colSums(is.na(readings_ocr))
+readings_ocr_na <- readings_ocr %>%
   filter(is.na(실시일시))
 
 ```
@@ -207,17 +197,17 @@ reports_ocr_na <- reports_ocr %>%
 #| label: as.Date
  
 
-reports_ocr <- reports_ocr %>%
+readings_ocr <- readings_ocr %>%
   mutate(
     처방일자 = as.Date(처방일자),
     실시일시 = as.Date(실시일시)
   )
 
-reports_ocr <- reports_ocr %>%
+readings_ocr <- readings_ocr %>%
   filter(!grepl("Y", 나이, ignore.case = TRUE)) %>%
   mutate(나이 = as.numeric(나이))
 
-reports_ocr_invalid_ptid <- my_validate_ptid (reports_ocr, "환자번호")
+readings_ocr_invalid_ptid <- my_validate_ptid (readings_ocr, "환자번호")
 
 ```
 
