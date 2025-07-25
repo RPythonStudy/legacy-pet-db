@@ -1,7 +1,7 @@
 ---
 title: Legacy PET Database
 author: BenKorea
-description: "Access PET 판독과 준비기록을 시기별로 정리"
+description: "Access PET 판독과 준비기록을 매칭하여 csv 파일로 저장함"
 date: "2025-07-23"
 date-modified: last-modified
 toc-depth: 4
@@ -12,11 +12,13 @@ toc-depth: 4
 #| echo: false
 #| message: false
 
+## 프로젝트에 필요한 모든 패키지들을 호출
 library(here)
 library(readxl)
 library(dplyr)
 library(data.table)
 
+## ./R로부터 모든 자체 함수들을 호출
 invisible(lapply(
   list.files(here::here("R"), pattern = "\\.R$", full.names = TRUE),
   source,
@@ -26,109 +28,161 @@ invisible(lapply(
 ```
 
 ```{r}
-#| label: readings_access
+#| label: "readings_access"
 
+## ./data/raw/readngs_access/ 로부터 Access의 Reading 테이블에서 기원한 Reading.xlsx를 data.table로 읽어드림
 readings_access <- my_read_excel_dir(directory="./data/raw/readings_access/", pattern = "\\.xlsx$")
+
+## 날짜변환
 readings_access[, `ExamDate` := as.Date(as.numeric(`ExamDate`), origin = "1899-12-30")]
 
-readings_access <- readings_access %>%
-  filter(
-    grepl("PET|18F", ExamName, ignore.case = TRUE)
-  )
+## [Hard-coded correction] ExamName 오류 수동 수정 (PtName: 정경옥 → Liver)
+readings_access[PtName == "정경옥", ExamName := "Liver"]
 
-```
+## [Hard-coded correction] PtID 누락 수동 보정 (PtName: 민병상, ExamDate: 1999-12-09 → PtID: 814428)
+readings_access[ExamDate == as.Date("1999-12-08") & PtName == "민병상", PtID := "814428"]
+readings_access[ExamDate == as.Date("2002-03-04") & PtName == "김봉주", ExamDate := as.Date("2002-02-28")]
+readings_access[ExamDate == as.Date("2004-03-28") & PtName == "전강진", ExamDate := as.Date("2004-03-26")]
+
+## ExamName에 PET|18F가 포함된 경우를 PET 판독으로 필터링
+readings_access <- readings_access[grepl("PET|18F", ExamName, ignore.case = TRUE)]
 
 
+## 사용자 정의 함수로 PtID 형식이 유효하지 않은 레코드만 추출
+readings_access_invalid <- my_filter_invalid_ptid(readings_access, "PtID")
 
-```{r}
-#| label: readings_access_ptid_validation
-
-readings_access_invalid_ptid <- my_validate_ptid(readings_access, "PtID")
-
+## PtID 입력오류를 수정하기 위해 reference 데이터로 preparations_access를 사용
 preparations_access <- my_read_excel_dir(directory="./data/raw/preparations_access/", pattern = "\\.xlsx$")
 preparations_access[, `ExamDate` := as.Date(as.numeric(`ExamDate`), origin = "1899-12-30")]
 
+## 복구될 수 없는 결측치 제거
+preparations_access <- my_remove_invalid_rows(preparations_access)
 
-readings_access_invalid_ptid[
-  preparations_access[, .(PtName, ExamDate, PtID)], 
-  on = .(PtName, ExamDate), 
-  PtID := i.PtID
+## 사용자 정의 함수로 PtID 형식이 유효하지 않은 레코드만 추출 
+preparations_access_invalid <- my_filter_invalid_ptid(preparations_access, "PtID")
+
+## [Hard-coded correction] PtID에 PtName이 온 오류를 수정
+preparations_access_invalid[PtID == "조성임", PtName := "조성임"]
+
+readings_access_invalid[
+  preparations_access[, .(PtName, ExamDate, PtID)],  # 참조 테이블에서 필요한 컬럼만 추출
+  on = .(PtName, ExamDate),                # 기준 키
+  PtID := i.PtID                           # 참조 테이블의 PtID로 덮어쓰기
 ]
 
-
-# 1. NA인 PtID의 PtName 추출
-target_names <- readings_access_invalid_ptid %>%
-  filter(is.na(PtID)) %>%
-  pull(PtName) %>%
-  unique()
-
-# 2. preparations_access에서 해당 PtName 가진 행 추출
-preparations_access_subset <- preparations_access %>%
-  filter(PtName %in% target_names)
-
-unique_ptid_dt <- preparations_access_subset[
-  !is.na(PtID), 
-  .(n_unique = uniqueN(PtID), PtID = unique(PtID)), 
-  by = PtName
-][n_unique == 1, .(PtName, PtID)]
-
-# 2. readings_access_invalid_ptid에 업데이트
-readings_access_invalid_ptid[
-  unique_ptid_dt, 
-  on = .(PtName), 
-  PtID := i.PtID
-]
-
+## PtID 갱신: readings_access_invalid의 ID 기준으로
 readings_access[
-  readings_access_invalid_ptid, 
-  on = .(ID), 
-  PtID := i.PtID
+  readings_access_invalid[, .(ID, PtID)],  # ID와 새로운 PtID만 추출
+  on = .(ID),                              # ID 기준으로 join
+  PtID := i.PtID                           # 참조 테이블의 PtID로 갱신
 ]
 
-readings_access[PtName == "민병상", PtID := "814428"]
-
-# colSums(is.na(readings_access))
-
-
-n_access_only <- nrow(readings_access[ExamDate < as.Date("2000-07-04")])
-readings_access[, PtID := my_pad_ptid(PtID)]
-
-n_readings_access <- nrow(readings_access)
+n_readings_access <-nrow(readings_access)
+first_date_readings_access <- min(readings_access$ExamDate, na.rm = TRUE)
+last_date_readings_access <- max(readings_access$ExamDate, na.rm = TRUE)
 ```
 
+```{r}
+#| label: "preparations_access"
+
+preparations_access_invalid[
+  readings_access[, .(PtName, ExamDate, PtID)],  # 참조 테이블에서 필요한 컬럼만 추출
+  on = .(PtName, ExamDate),                # 기준 키
+  PtID := i.PtID                           # 참조 테이블의 PtID로 덮어쓰기
+]
+
+remove_chars <- "[`'oㅇ.b]"
+preparations_access_invalid[, PtID := gsub(remove_chars, "", PtID)]
+
+# 1. 날짜 범위 계산
+preparations_access_invalid[, `:=`(
+  date_min = ExamDate - 7,
+  date_max = ExamDate + 7
+)]
+
+# 2. 비이퀄 조인으로 ±7일 내 매칭
+preparations_access_invalid[
+  readings_access,
+  on = .(PtName, date_min <= ExamDate, date_max >= ExamDate),
+  PtID := i.PtID
+]
+
+
+## 하드코딩으로 오류 수정
+preparations_access_invalid[PtName == "이재숙", PtID := "T9804211"]
+preparations_access_invalid[PtName == "오경순", PtID := "908632"]
+preparations_access_invalid[PtName == "강영임", PtID := "938463"]
+preparations_access_invalid[PtName == "이선호", PtID := "951482"]
+preparations_access_invalid[PtName == "김제순", PtID := "949996"]
+preparations_access_invalid[PtName == "강종구", PtID := "885965"]
+preparations_access_invalid[PtName == "홍윤표", PtID := "533195"]
+preparations_access_invalid[PtName == "윤대일", PtID := "961200"]
+preparations_access_invalid[PtName == "정정용", PtID := "951484"]
+preparations_access[ID == "47402", ExamDate := as.Date("2007-07-31")]
+
+## PtID 갱신: readings_access_invalid의 ID 기준으로
+preparations_access[
+  preparations_access_invalid[, .(ID, PtID)],  # ID와 새로운 PtID만 추출
+  on = .(ID),                              # ID 기준으로 join
+  PtID := i.PtID                           # 참조 테이블의 PtID로 갱신
+]
+
+preparations_access_na_Ptname <-preparations_access[is.na(PtName)]
+preparations_access <-preparations_access[!is.na(PtName)]
+preparations_access_na_ExamDate <-preparations_access[is.na(ExamDate)]
+preparations_access <-preparations_access[!is.na(ExamDate)]
+
+n_preparations_access <- nrow(preparations_access)
+first_date_preparations_access <- min(preparations_access$ExamDate, na.rm = TRUE)
+last_date_preparations_access <- max(preparations_access$ExamDate, na.rm = TRUE)
+```
 
 ```{r}
-#| label: "readings_ocr"
+#| label: "readings_ocs"
+
 
 readings_ocs <- my_read_excel_dir (directory="./data/raw/readings_ocs/", pattern = "\\.xlsx$")
-n_readings_ocs <- nrow(readings_ocs)
+## 병합준비
 setnames(readings_ocs, old = c("환자번호", "실시일시"), new = c("PtID", "ExamDate"))
-
-# ExamDate를 Date 형식으로 변환
 readings_ocs[, ExamDate := as.Date(ExamDate)]
 
-matched_readings_access <- readings_access[readings_ocs, 
-                                           on = .(PtID, ExamDate), 
-                                           nomatch = 0]
+n_readings_ocs <- nrow(readings_ocs)
+first_date_readings_ocs <- min(readings_ocs$ExamDate, na.rm = TRUE)
+last_date_readings_ocs <- max(readings_ocs$ExamDate, na.rm = TRUE)
 
-readings_merged <- merge(readings_access, readings_ocs,
-                    by = c("PtID", "ExamDate"),
-                    all = TRUE,
-                    suffixes = c(".access", ".ocs"))
-
-
+readings_ocs <- readings_ocs[ExamDate < as.Date("2016-12-31")]
 
 ```
 
+```{r}
+#| label: "preparation_ocs"
 
+preparations_ocs <- my_read_excel_dir("./data/raw/preparations_ocs/", pattern = "\\.xlsx$")
+
+## 병합준비
+setnames(preparations_ocs, old = c("환자번호", "검사일자"), new = c("PtID", "ExamDate"))
+preparations_ocs[, ExamDate := as.Date(ExamDate)]
+
+preparations_ocs_na_ExamDate <- preparations_ocs[is.na(ExamDate)]
+preparations_ocs <- preparations_ocs[!is.na(ExamDate)]
+
+preparations_ocs <- preparations_ocs[!is.na(WEIGHT) | !is.na(방사화합물) | !is.na(RADCOMPNDETC)]
+
+n_preparations_ocs <- nrow(preparations_ocs)
+first_date_preparations_ocs <- min(preparations_ocs$ExamDate, na.rm = TRUE)
+last_date_preparations_ocs <- max(preparations_ocs$ExamDate, na.rm = TRUE)
+
+```
 
 ```{r}
-#| label: preparation_access
 
-preparation_access_invalid_ptid <- my_validate_ptid (preparation_access, "PtID")
-colSums(is.na(preparation_access))
-preparation_access_na_ptid_ptname_examdate <- preparation_access_raw %>%
-  filter(is.na(PtID) & is.na(PtName) & is.na(ExamDate))
+#| label: 비교
+
+# 일치하는 행만
+matched <- merge(readings_ocs, preparations_ocs, by = c("PtID", "ExamDate"))
+only_in_readings <- readings_ocs[!preparations_ocs, on = .(PtID, ExamDate)]
+only_in_preparations <- preparations_ocs[!readings_ocs, on = .(PtID, ExamDate)]
+
 
 
 ```
@@ -136,7 +190,10 @@ preparation_access_na_ptid_ptname_examdate <- preparation_access_raw %>%
 ```{r}
 #| label: pet_pacs
 
-pet_pacs_raw <- my_read_excel_dir(directory="./data/raw/pet_pacs/", pattern = "\\.xlsx$")
+pet_pacs <- my_read_excel_dir(directory="./data/raw/pet_pacs/", pattern = "\\.xlsx$")
+
+pet_pacs[, `ExamDate` := as.Date(as.numeric(`Req. Date`), origin = "1899-12-30")]
+pet_pacs <- [pet_pacs, !grepl("^[[:space:]]*$", `Req. Name`)] # Req. Name이 공백인 경우 제거
 
 pet_pacs_na_study_date <- pet_pacs_raw %>%
   filter(is.na(`Study Date`))
@@ -217,25 +274,6 @@ readings_ocr_invalid_ptid <- my_validate_ptid (readings_ocr, "환자번호")
 -   PET 검사기록지가 조회가 되기 시작하는 것이 대략적으로 2007-09-27 부터입니다.
 -   2007-09-27 이후라고 할지라도 2009년경까지는 일부는 검사기록지가 있고 일부는 없고 일관성 없습니다.
 -   전산팀으로부터 전달받은 자료를 `preparation_ocr`로 읽어 드립니다.
-
-```{r}
-#| label: "preparation_ocr"
-
-
-
-preparation_ocr <- my_read_excel_dir("./data/preparation_ocr/", pattern = "\\.xlsx$")
-
-colSums(is.na(preparation_ocr))
-
-preparation_ocr_na <- preparation_ocr %>%
-  filter(is.na(검사일자))
-
-preparation_ocr_invalide_ptid <- my_validate_ptid (preparation_ocr, "환자번호")
-
-preparation_ocr_bwt <- preparation_ocr %>%
-  filter(!is.na(WEIGHT))
-
-```
 
 ## PET 준비기록 at Access database
 
