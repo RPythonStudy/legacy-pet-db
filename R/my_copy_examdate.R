@@ -6,6 +6,6 @@ my_copy_examdate <- function(na_data, reference_data) {
           on = .(PtID, ReqDate), 
           ExamDate := i.ExamDate]
   
-  log_info("ExamDate 복사 완료")
+  log_debug("ExamDate 복사 완료")
   return(na_data)
 }

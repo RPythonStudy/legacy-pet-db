@@ -7,7 +7,6 @@ date-modified: last-modified
 toc-depth: 4
 ---
 
-
 ```{r}
 #| label: setup
 #| echo: false
@@ -90,6 +89,8 @@ if (file.exists("./data/rds/preparations_access.rds")) {
 #| fig-width: 10
 #| fig-height: 6
 
+logger::log_info("OCS 총판독건수: {nrow(readings_ocs)}건")
+
 # outside reading은 제외 (프로젝트 지침)
 readings_ocs <- readings_ocs[!grepl("outside", 항목명, ignore.case = TRUE)]
 
@@ -138,35 +139,31 @@ rm(readings_ocs_na, readings_ocs_not_na, readings_ocs_na_copied)
 #| fig-width: 10
 #| fig-height: 6
 
+logger::log_info("reading_pacs 총건수: {nrow(readings_pacs)}건")
+
 # outside PET이 포함된 경우를 제외 (프로젝트 지침)
 readings_pacs <- readings_pacs[!grepl("outside", `Req. Name`, ignore.case = TRUE)]
-logger::log_debug("outside PET 제외 후: {nrow(readings_pacs)}건")
+logger::log_info("outside PET 제외 후: {nrow(readings_pacs)}건")
 
 # ExamDate가 NA인 경우 readings_ocs에서 복사하여 채우기
 readings_pacs_na <- readings_pacs[is.na(ExamDate)]
-logger::log_debug("PACS 판독 중 ExamDate NA: {nrow(readings_pacs_na)}건")
+logger::log_info("PACS 판독 중 ExamDate NA: {nrow(readings_pacs_na)}건")
 
-if (nrow(readings_pacs_na) > 0) {
-  # 새로운 단순 함수로 ExamDate 복사
-  readings_pacs_na_copied <- my_copy_examdate(
-    na_data = readings_pacs_na,
-    reference_data = readings_ocs
-  )
-  
-  # NA가 아닌 데이터와 병합
-  readings_pacs_not_na <- readings_pacs[!is.na(ExamDate)]
-  readings_pacs <- rbind(readings_pacs_not_na, readings_pacs_na_copied)
-  logger::log_debug("ExamDate 복사 후 총 행 수: {nrow(readings_pacs)}")
-}
+reading_pacs <-readings_pacs[!is.na(ExamDate)]
+logger::log_info("PACS 판독 중 ExamDate NA 제외건수: {nrow(readings_pacs)}건")
+
 
 # 분석 기간으로 제한 (2003-05-12 ~ 2016-12-31)
 readings_pacs <- readings_pacs[ExamDate >= as.Date("2003-05-12") & ExamDate <= as.Date("2016-12-31")]
-logger::log_info("PACS PET 판독 최종 데이터: {nrow(readings_pacs)}건")
+logger::log_info("PACS PET 2003-05-12 ~ 2016-12-31 건수수: {nrow(readings_pacs)}건")
+
+pacs_unique_keys <- unique(readings_pacs[, .(PtID, ExamDate)])
+
 
 # 사용자정의 함수로 월별건수 시각화 (표준화된 컬럼명 사용)
-my_plot_monthly_counts(readings_pacs, ExamDate, "PACS PET검사")
+my_plot_monthly_counts(pacs_unique_keys, ExamDate, "PACS PET검사")
 
-rm(readings_pacs_na, readings_pacs_not_na, readings_pacs_na_copied)
+# rm(readings_pacs_na, readings_pacs_not_na, readings_pacs_na_copied)
 
 ```
 
@@ -210,6 +207,7 @@ rm(preparations_ocs_na)
 #| warning: false
 #| fig-width: 10
 #| fig-height: 6
+#| eval: false
 
 logger::log_info("readings_ocs 기간을 readings_pacs과 같도록 2003-05-12 ~ 2016-12-31으로 진행합니다.")
 readings_ocs_for_matching <- readings_ocs[ExamDate >= as.Date("2003-05-12") & ExamDate <= as.Date("2016-12-31")]
@@ -267,15 +265,6 @@ my_plot_monthly_counts(preparations_access, ExamDate, "Access 준비기록")
 -   2009-08-07까지 입력되어 있음
 -   OCS에 준비기록이 입력된 후에서 연구용처럼 오더가 없는 경우는 Access로 준비/판독 되었음
 
-```{r}
-#| label: access-pet-readings-plot
-#| echo: false
-#| message: false
-#| warning: false
-#| fig-width: 10
-#| fig-height: 6
-
-```
 
 ```{r}
 #| label: access-readings-data-cleaning
@@ -292,9 +281,6 @@ readings_access <- readings_access[grepl("PET|18F", ExamName, ignore.case = TRUE
 ## 사용자 정의 함수로 PtID 형식이 유효하지 않은 레코드만 추출
 readings_access_invalid <- my_filter_invalid_ptid(readings_access, "PtID")
 
-## PtID 입력오류를 수정하기 위해 reference 데이터로 preparations_access를 사용
-preparations_access <- my_read_excel_dir(directory="./data/raw/preparations_access/", pattern = "\\.xlsx$")
-preparations_access[, `ExamDate` := as.Date(as.numeric(`ExamDate`), origin = "1899-12-30")]
 ## [Hard-coded correction]
 readings_access[PtName == "정경옥", ExamName := "Liver"]
 readings_access[ExamDate == as.Date("1999-12-08") & PtName == "민병상", PtID := "814428"]
@@ -323,9 +309,6 @@ readings_access[
   PtID := i.PtID                           # 참조 테이블의 PtID로 갱신
 ]
 
-n_readings_access <-nrow(readings_access)
-first_date_readings_access <- min(readings_access$ExamDate, na.rm = TRUE)
-last_date_readings_access <- max(readings_access$ExamDate, na.rm = TRUE)
 ```
 
 ```{r}
@@ -381,10 +364,39 @@ preparations_access <-preparations_access[!is.na(PtName)]
 preparations_access_na_ExamDate <-preparations_access[is.na(ExamDate)]
 preparations_access <-preparations_access[!is.na(ExamDate)]
 
-n_preparations_access <- nrow(preparations_access)
-first_date_preparations_access <- min(preparations_access$ExamDate, na.rm = TRUE)
-last_date_preparations_access <- max(preparations_access$ExamDate, na.rm = TRUE)
+preparations_access[, PtID := my_pad_ptid(PtID)]
 ```
+
+```{r}
+#| label: access_ocs
+
+dt_ocs <- preparations_ocs[, .(PtID, ExamDate, 검사명)]
+dt_access <- preparations_access[, .(PtID, ExamDate)]
+
+# 2. 중복 제거 (중요)
+dt_ocs <- unique(dt_ocs)
+dt_access <- unique(dt_access)
+
+merged <- merge(
+  dt_access, dt_ocs,
+  by = c("PtID", "ExamDate"),
+  all = TRUE,   # 둘 중 하나라도 있으면 포함
+  suffixes = c(".access", ".ocs")
+)
+
+readings_keys <- unique(readings_pacs[, .(PtID, ExamDate)])
+merged_keys   <- unique(merged[, .(PtID, ExamDate)])
+
+only_in_readings <- readings_keys[!merged_keys, on = .(PtID, ExamDate)]
+readings_missing_preparation <- readings_pacs[only_in_readings, on = .(PtID, ExamDate)]
+
+
+
+my_plot_monthly_counts(readings_missing_preparation, ExamDate, "준비기록 없는 판독독")
+
+
+```
+
 
 ```{r}
 #| label: data-comparison
